@@ -7,11 +7,11 @@ namespace AirCopyRebirth.Services {
     // adapted from https://stackoverflow.com/questions/283456/byte-array-pattern-search
     public static class ByteArrayExtensions {
 
-        public static bool Contains(this byte[] self, byte[] patternToFind) {
+        public static bool Contains(this byte[] self, byte[] patternToFind, int offset = 0) {
             if (EitherArrayIsEmpty(self, patternToFind)) {
                 return false;
             }
-            for (int i = 0; i < self.Length; i++) {
+            for (int i = offset; i < self.Length; i++) {
                 if (IsMatch(self, i, patternToFind))
                     return true;
                 else { continue; }
@@ -20,13 +20,13 @@ namespace AirCopyRebirth.Services {
         }
 
         static readonly int[] Empty = new int[0];
-        public static int[] Locate(this byte[] self, byte[] patternToFind) {
+        public static int[] Locate(this byte[] self, byte[] patternToFind, int offset = 0) {
             if (EitherArrayIsEmpty(self, patternToFind))
                 return Empty;
 
             var list = new List<int>();
 
-            for (int i = 0; i < self.Length; i++) {
+            for (int i = offset; i < self.Length; i++) {
                 if (!IsMatch(self, i, patternToFind))
                     continue;
 
