@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace AirCopyRebirth.Services {
@@ -52,6 +53,17 @@ namespace AirCopyRebirth.Services {
                 || array.Length == 0
                 || patternToFind.Length == 0
                 || patternToFind.Length > array.Length;
+        }
+
+        public static byte[] StripEndMarker(this byte[] self, byte[] patternToFind) {
+            var patternLocations = self.Locate(patternToFind);
+            if (patternLocations.Length == 0) { return null; }
+
+            // the pattern should only appear once (at the end):
+            int sizeOfArrayBeforePattern = patternLocations[0];
+            byte[] strippedArray = new byte[sizeOfArrayBeforePattern];
+            Array.Copy(self, strippedArray, sizeOfArrayBeforePattern);
+            return strippedArray;
         }
     }
 }
