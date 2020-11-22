@@ -57,7 +57,7 @@ namespace AirCopyRebirth.Services {
 
         public static byte[] StripEndMarker(this byte[] self, byte[] patternToFind) {
             var patternLocations = self.Locate(patternToFind);
-            if (patternLocations.Length == 0) { return null; }
+            if (patternLocations.Length == 0) { return self; }
 
             // the pattern should only appear once (at the end):
             int sizeOfArrayBeforePattern = patternLocations[0];

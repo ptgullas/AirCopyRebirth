@@ -95,5 +95,16 @@ namespace AirCopyRebirth.Tests {
             Assert.Equal(expectedresultSize, result.Length);
         }
 
+        [Fact]
+        public void StripEndMarker_ByteArrayDoesNotContainMarker_ReturnsSameArray() {
+            byte[] response = { 0x00, 0x30, 0x00, 0x40, (byte)'n', (byte)'g', (byte)'o', 0x22 };
+            byte[] expected = { 0x00, 0x30, 0x00, 0x40, (byte)'n', (byte)'g', (byte)'o', 0x22 };
+
+            byte[] result = response.StripEndMarker(AirScannerResponse.SCAN_GO);
+
+            Assert.Equal(expected, result);
+        }
+
+
     }
 }
