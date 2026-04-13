@@ -41,7 +41,7 @@ namespace AirCopyRebirth.Tests {
         }
 
         [Fact]
-        public void Contains_ReadScanPreviewWithEndTagFromFileStream_ReturnsTrue() {
+        public void Contains_ReadScanPreviewWithEndTagFromFileStreamEndWhenReadEqualsZero_ReturnsTrue() {
             string pathToPreview = @"..\..\..\SampleData\previewWithEndMarker.jpg";
             // quick way to test the path to the Sample Data
             Assert.True(File.Exists(pathToPreview));
@@ -57,33 +57,56 @@ namespace AirCopyRebirth.Tests {
             string newPath = Path.Combine(dir, newFileName);
             File.WriteAllBytes(newPath, tempBytesWithEndMarker);
             */
-            // we want to test what happens when the end marker is torn apart
-            // (i.e., when it is read in separate loops)
+
             byte[] buffer = new byte[500000];
-            int loops = 0;
             using (FileStream fs = new FileStream(pathToPreview, FileMode.Open)) {
                 int bytesToReadPerLoop = 1920;
                 int totalBytesRead = 0;
                 int bytesReadThisLoop;
                 while ((bytesReadThisLoop = fs.Read(buffer, totalBytesRead, bytesToReadPerLoop)) > 0) {
                     totalBytesRead += bytesReadThisLoop;
-                    loops++;
                 }
                 Console.Write("out of while loop\n");
             }
             var result = buffer.Contains(endMarker);
             Assert.True(result);
-
-
-            //byte[] endMarker = { (byte)'p', (byte)'r', (byte)'e', (byte)'v', (byte)'i', (byte)'e', (byte)'w', (byte)'e', (byte)'n', (byte)'d' };
-            //byte[] previewWithMarker = previewBytes.Concat(endMarker).ToArray();
-            //int previewWithMarkerSize = 156809;
-            //Assert.Equal(previewWithMarkerSize, previewWithMarker.Length);
-
-            //byte[] endMarkerToCheck = AirScannerResponse.PREVIEW_END;
-            //var result = previewWithMarker.Contains(endMarkerToCheck);
-            //Assert.True(result);
         }
+
+        [Fact]
+        public void Contains_ReadScanPreviewWithEndTagFromFileStreamEndWhenReadEqualsZeroOrEndTagIsFound_ReturnsTrue() {
+            string pathToPreview = @"..\..\..\SampleData\previewWithEndMarker.jpg";
+            // quick way to test the path to the Sample Data
+            // Assert.True(File.Exists(pathToPreview));
+
+            byte[] endMarker = { (byte)'p', (byte)'r', (byte)'e', (byte)'v', (byte)'i', (byte)'e', (byte)'w', (byte)'e', (byte)'n', (byte)'d' };
+
+            // we want to test what happens when the end marker is torn apart
+            // (i.e., when it is read in separate loops)
+            byte[] buffer = new byte[500000];
+            using (FileStream fs = new FileStream(pathToPreview, FileMode.Open)) {
+                int bytesToReadPerLoop = 1920;
+                int totalBytesRead = 0;
+                int bytesReadThisLoop;
+                bool foundPattern = false;
+                while ((bytesReadThisLoop = fs.Read(buffer, totalBytesRead, bytesToReadPerLoop)) > 0 && foundPattern == false) {
+                    totalBytesRead += bytesReadThisLoop;
+
+                    // check for end tag in buffer minus the # of bytes read this loop minus the tag length
+                    // in case the end tag is torn apart
+                    int offSetToCheck = totalBytesRead - (bytesReadThisLoop - endMarker.Length - 1);
+                    if (offSetToCheck < 0) {
+                        offSetToCheck = 0;
+                    }
+                    if (buffer.Contains(endMarker, offSetToCheck)) {
+                        foundPattern = true;
+                    }
+                }
+                Console.Write("out of while loop\n");
+            }
+            var result = buffer.Contains(endMarker);
+            Assert.True(result);
+        }
+
 
         [Fact]
         public void Locate_ByteArrayContainsScanPreviewWithEndTag_ReturnsLocationOfEndTag() {

@@ -1,102 +1,154 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Sockets;
+using System.Text;
 using System.Threading;
 
 namespace AirCopyRebirth.Services {
     public static class AirScanner {
 
         public enum ScannerStatus { BatteryLow, NoPaper, DevBusy, ScanReady, ScanningStarted, Invalid }
-        public enum Dpi { Standard, Fine }
+        public enum Dpi { Standard = 300, Fine = 600 }
 
         public static string AirCopyIpAddress = "192.168.18.33";
         public static int AirCopyPort = 23;
 
         public const int AirCopyResponseSize = 16;
 
-        private static readonly byte[] GET_VERSION = { 0x30, 0x30, 0x20, 0x20 };
-        private static readonly byte[] GET_STATUS = { 0x00, 0x60, 0x00, 0x50 };
+        // Commands (Little Endian)
+        private static readonly byte[] GET_VERSION = { 0x30, 0x30, 0x20, 0x20 };        // 20203030
+        private static readonly byte[] GET_STATUS = { 0x00, 0x60, 0x00, 0x50 };         // 50006000
+        private static readonly byte[] START_CLEANING = { 0x80, 0x80, 0x70, 0x70 };     // 70708080
+        private static readonly byte[] START_CALIBRATION = { 0x00, 0xb0, 0x00, 0xa0 };  // a000b000
+        private static readonly byte[] SET_DPI_STANDARD = { 0x40, 0x30, 0x20, 0x10 };   // 10203040
+        private static readonly byte[] SET_DPI_HIGH = { 0x80, 0x70, 0x60, 0x50 };       // 50607080
+        private static readonly byte[] START_SCAN = { 0x00, 0x20, 0x00, 0x10 };         // 10002000
+        private static readonly byte[] SEND_PREVIEW_DATA = { 0x40, 0x40, 0x30, 0x30 };  // 30304040
+        private static readonly byte[] GET_JPEG_SIZE = { 0x00, 0xd0, 0x00, 0xc0 };      // c000d000
+        private static readonly byte[] SEND_JPEG_DATA = { 0x00, 0xf0, 0x00, 0xe0 };      // e000f000
 
-        private static readonly byte[] START_CLEANING = { 0x80, 0x80, 0x70, 0x70 };
-        private static readonly byte[] START_CALIBRATION = { 0x00, 0x50, 0x00, 0x60 };
-
-        private static readonly byte[] SET_DPI_STANDARD = { 0x40, 0x30, 0x20, 0x10 };
-        private static readonly byte[] SET_DPI_HIGH = { 0x80, 0x70, 0x60, 0x50 };
-
-        private static readonly byte[] START_SCAN = { 0x00, 0x20, 0x00, 0x10 };
-        private static readonly byte[] SEND_PREVIEW_DATA = { 0x40, 0x40, 0x30, 0x30 };
-
-        private static readonly byte[] GET_JPEG_SIZE = { 0x00, 0x30, 0x00, 0x40 };
-        private static readonly byte[] SEND_JPEG_DATA = { 0x00, 0x10, 0x00, 0x20 };
-                
-        public static ScannerStatus GetStatusWithTcpClient() {
-            (byte[] response, int byteRead) = SendMessage(GET_STATUS, 200);
-            string responseStr = System.Text.Encoding.ASCII.GetString(response, 0, byteRead);
-            return MapResponseToScannerStatus(responseStr);
-        }
-
-        public static string GetVersion() {
-            (byte[] response, int byteRead) = SendMessage(GET_VERSION, 200);
-            string responseStr = System.Text.Encoding.ASCII.GetString(response, 0, byteRead);
-            return responseStr;
-        }
-
-        public static string StartScan() {
-            (byte[] response, int byteRead) = SendMessage(START_SCAN, 200);
-            string responseStr = System.Text.Encoding.ASCII.GetString(response, 0, byteRead);
-            return responseStr;
-        }
-
-        public static byte[] StartScanAndGetScan() {
-            (byte[] response, int byteRead) = SendMessageToScanThenReceiveJpegData(20000);
-            return response;
-        }
-
-        public static string GetJpegSize(Dpi dpi) {
-            int sleepInMs;
-            if (dpi == Dpi.Standard) {
-                sleepInMs = 12000;
-            }
-            else { sleepInMs = 35000; }
-
-            (byte[] response, int byteRead) = SendMessage(GET_JPEG_SIZE, sleepInMs, 100);
-            string responseStr = System.Text.Encoding.ASCII.GetString(response, 0, byteRead);
-            return responseStr;
-        }
-
-        public static (byte[], int) GetJpegData() {
-            return SendMessage(START_SCAN, 500, 30720);
-        }
-
-        private static (byte[], int) SendMessage(byte[] command, int sleepInMs = 0, int bufferSize = AirCopyResponseSize) {
-            string response = "";
+        public static byte[] PerformScan(Dpi dpi, Action<string> logger = null) {
+            logger?.Invoke($"Connecting to {AirCopyIpAddress}:{AirCopyPort}...");
             using (TcpClient client = new TcpClient()) {
                 client.Connect(AirCopyIpAddress, AirCopyPort);
-                // using (SslStream stream = new SslStream(client.GetStream(), true)) {
                 using (NetworkStream stream = client.GetStream()) {
+                    stream.ReadTimeout = 10000;
 
-                    // stream.AuthenticateAsClient(AirCopyIpAddress);
-                    StreamReader reader = new StreamReader(stream);
-                    StreamWriter writer = new StreamWriter(stream) {
-                        AutoFlush = true
-                    };
+                    // 1. Check Status
+                    logger?.Invoke("Checking status...");
+                    string statusStr = SendCommandAndReadResponse(stream, GET_STATUS);
+                    logger?.Invoke($"Status: {statusStr}");
+                    var status = MapResponseToScannerStatus(statusStr);
+                    if (status != ScannerStatus.ScanReady) {
+                        throw new Exception($"Scanner not ready: {statusStr}");
+                    }
 
-                    // stream.Write(GET_VERSION);
-                    // stream.Write(Encoding.ASCII.GetBytes(dataToSend));
-                    stream.Write(command, 0, command.Length);
+                    // 2. Set DPI
+                    logger?.Invoke($"Setting DPI to {dpi}...");
+                    byte[] dpiCommand = dpi == Dpi.Fine ? SET_DPI_HIGH : SET_DPI_STANDARD;
+                    string dpiResponse = SendCommandAndReadResponse(stream, dpiCommand);
+                    logger?.Invoke($"DPI Response: {dpiResponse}");
 
-                    // bastel waits 200ms here but it works without it
-                    Thread.Sleep(sleepInMs);
+                    // 3. Start Scan
+                    logger?.Invoke("Starting scan...");
+                    string scanResponse = SendCommandAndReadResponse(stream, START_SCAN);
+                    logger?.Invoke($"Scan Response: {scanResponse}");
+                    if (MapResponseToScannerStatus(scanResponse) != ScannerStatus.ScanningStarted) {
+                        throw new Exception($"Failed to start scan: {scanResponse}");
+                    }
 
-                    int byteRead = 0;
-                    // byte[] buffer = new byte[airCopyResponseSize];
-                    byte[] buffer = Enumerable.Repeat((byte)0, bufferSize).ToArray();
+                    // 4. (Optional) Preview Data
+                    // We'll skip reading preview data to get to the JPEG faster,
+                    // but we need to wait for the scan to finish.
+                    logger?.Invoke("Waiting for scan to complete...");
+                    int waitMs = dpi == Dpi.Fine ? 35000 : 12000;
+                    Thread.Sleep(waitMs);
 
-                    byteRead = stream.Read(buffer, 0, bufferSize);
-                    // response += System.Text.Encoding.ASCII.GetString(buffer, 0, byteRead);
-                    return (buffer, byteRead);
+                    // 5. Get JPEG Size
+                    logger?.Invoke("Requesting JPEG size...");
+                    // Need a longer timeout for this one as the scanner might still be processing
+                    stream.ReadTimeout = 20000;
+                    byte[] sizeBuffer = SendCommandAndGetResponseBytes(stream, GET_JPEG_SIZE, 16);
+                    string sizeMarker = Encoding.ASCII.GetString(sizeBuffer, 0, 8);
+                    if (!sizeMarker.StartsWith("jpegsize")) {
+                        throw new Exception($"Unexpected JPEG size response: {Encoding.ASCII.GetString(sizeBuffer)}");
+                    }
+
+                    int jpegSize = BitConverter.ToInt32(sizeBuffer, 8);
+                    logger?.Invoke($"JPEG size: {jpegSize} bytes");
+
+                    if (jpegSize <= 0 || jpegSize > 20 * 1024 * 1024) {
+                        throw new Exception($"Invalid JPEG size: {jpegSize}");
+                    }
+
+                    // 6. Get JPEG Data
+                    logger?.Invoke("Requesting JPEG data...");
+                    stream.ReadTimeout = 30000;
+                    SendCommand(stream, SEND_JPEG_DATA, 500);
+
+                    byte[] jpegData = new byte[jpegSize];
+                    int totalRead = 0;
+                    while (totalRead < jpegSize) {
+                        int read = stream.Read(jpegData, totalRead, jpegSize - totalRead);
+                        if (read == 0) break;
+                        totalRead += read;
+                        if (totalRead % (100 * 1024) == 0 || totalRead == jpegSize) {
+                            logger?.Invoke($"Read {totalRead}/{jpegSize} bytes...");
+                        }
+                    }
+
+                    if (totalRead < jpegSize) {
+                        logger?.Invoke($"Warning: Only read {totalRead} of {jpegSize} bytes.");
+                    }
+
+                    logger?.Invoke("Scan complete!");
+                    return jpegData;
+                }
+            }
+        }
+
+        private static string SendCommandAndReadResponse(NetworkStream stream, byte[] command) {
+            SendCommand(stream, command);
+            return ReadResponseString(stream);
+        }
+
+        private static byte[] SendCommandAndGetResponseBytes(NetworkStream stream, byte[] command, int size) {
+            SendCommand(stream, command);
+            byte[] buffer = new byte[size];
+            int read = stream.Read(buffer, 0, size);
+            if (read < size) {
+                // Try to read the rest if it's fragmented
+                int remaining = size - read;
+                while (remaining > 0) {
+                    int r = stream.Read(buffer, read, remaining);
+                    if (r == 0) break;
+                    read += r;
+                    remaining -= r;
+                }
+            }
+            return buffer;
+        }
+
+        private static void SendCommand(NetworkStream stream, byte[] command, int delayAfterMs = 200) {
+            stream.Write(command, 0, command.Length);
+            Thread.Sleep(delayAfterMs);
+        }
+
+        private static string ReadResponseString(NetworkStream stream) {
+            byte[] buffer = new byte[AirCopyResponseSize];
+            int read = stream.Read(buffer, 0, AirCopyResponseSize);
+            if (read == 0) return string.Empty;
+            return Encoding.ASCII.GetString(buffer, 0, read).TrimEnd('\0', ' ');
+        }
+
+        public static ScannerStatus GetStatusWithTcpClient() {
+            using (TcpClient client = new TcpClient()) {
+                client.Connect(AirCopyIpAddress, AirCopyPort);
+                using (NetworkStream stream = client.GetStream()) {
+                    string response = SendCommandAndReadResponse(stream, GET_STATUS);
+                    return MapResponseToScannerStatus(response);
                 }
             }
         }
@@ -106,160 +158,19 @@ namespace AirCopyRebirth.Services {
             else if (response.StartsWith("nopaper")) { return ScannerStatus.NoPaper; }
             else if (response.StartsWith("devbusy")) { return ScannerStatus.DevBusy; }
             else if (response.StartsWith("scanready")) { return ScannerStatus.ScanReady; }
-            else if (response.StartsWith("scango")) { return ScannerStatus.ScanningStarted;  }
+            else if (response.StartsWith("scango")) { return ScannerStatus.ScanningStarted; }
             else { return ScannerStatus.Invalid; }
         }
 
-        private static (byte[], int) SendMessageToScanThenReceiveJpegData(int sleepInMs, int bufferSize = AirCopyResponseSize) {
-            string response = "";
-            using (TcpClient client = new TcpClient()) {
-                client.Connect(AirCopyIpAddress, AirCopyPort);
-                // using (SslStream stream = new SslStream(client.GetStream(), true)) {
-                using (NetworkStream stream = client.GetStream()) {
-
-                    // stream.AuthenticateAsClient(AirCopyIpAddress);
-                    StreamReader reader = new StreamReader(stream);
-                    StreamWriter writer = new StreamWriter(stream) {
-                        AutoFlush = true
-                    };
-                    byte[] command = START_SCAN;
-                    stream.Write(command, 0, command.Length);
-
-                    // bastel waits 200ms here but it works without it
-                    int sleepAfterScanCommand = 200;
-                    Thread.Sleep(sleepAfterScanCommand);
-
-                    int byteRead = 0;
-                    // byte[] buffer = new byte[airCopyResponseSize];
-                    byte[] buffer = Enumerable.Repeat((byte)0, bufferSize).ToArray();
-
-                    byteRead = stream.Read(buffer, 0, bufferSize);
-                    // response += System.Text.Encoding.ASCII.GetString(buffer, 0, byteRead);
-
-                    byte[] previewInfo = null;
-                    // the response should be "scango", otherwise return it
-                    response = System.Text.Encoding.ASCII.GetString(buffer, 0, byteRead);
-                    if (MapResponseToScannerStatus(response) == ScannerStatus.ScanningStarted) {
-                        Thread.Sleep(sleepInMs);
-                        Socket socket = client.Client;
-                        previewInfo = ReceiveAll(socket);
-                    }
-                    return (previewInfo, byteRead);
-                }
-            }
-        }
-
-        // ok, apparently you need to StartScan then get the preview before you can get the size
-        public static (byte[], int) StartScanThenGetJpegSize() {
+        // Legacy methods kept for compatibility but marked as obsolete or updated
+        [Obsolete("Use PerformScan instead")]
+        public static string GetVersion() {
             using (TcpClient client = new TcpClient()) {
                 client.Connect(AirCopyIpAddress, AirCopyPort);
                 using (NetworkStream stream = client.GetStream()) {
-
-                    // stream.AuthenticateAsClient(AirCopyIpAddress);
-                    StreamReader reader = new StreamReader(stream);
-                    StreamWriter writer = new StreamWriter(stream) {
-                        AutoFlush = true
-                    };
-
-                    byte[] command = START_SCAN;
-                    int sleepInMs = 200;
-
-                    (byte[] buffer, int bytesRead) = SendCommandToScannerAndGetResponse(stream, command, sleepInMs);
-
-                    string response = System.Text.Encoding.ASCII.GetString(buffer, 0, bytesRead);
-                    if (MapResponseToScannerStatus(response) == ScannerStatus.ScanningStarted) {
-                        // OK, here, let's try to get the preview
-                        command = SEND_PREVIEW_DATA;
-                        int sleepPreview = 1000;
-                        
-
-                        // now try to get Jpeg Size
-                        command = GET_JPEG_SIZE;
-                        int sleepStandardSize = 12000;
-                        (buffer, bytesRead) = SendCommandToScannerAndGetResponse(stream, command, sleepStandardSize);
-
-                        response = System.Text.Encoding.ASCII.GetString(buffer, 0, bytesRead);
-                        Console.WriteLine(response);
-
-                    }
-
-                    return (buffer, bytesRead);
+                    return SendCommandAndReadResponse(stream, GET_VERSION);
                 }
             }
         }
-
-        public static (byte[] buffer, int bytesRead) SendCommandToScannerAndGetResponse(NetworkStream stream, byte[] command, int sleepInMs, int responseSize = AirCopyResponseSize) {
-            SendCommandThenSleep(stream, command, sleepInMs);
-
-            return GetResponse(stream);
-        }
-
-        private static void SendCommandThenSleep(NetworkStream stream, byte[] command, int sleepInMs) {
-            stream.Write(command, 0, command.Length);
-            Thread.Sleep(sleepInMs);
-        }
-        private static (byte[] buffer, int bytesRead) GetResponse(NetworkStream stream) {
-            // byte[] buffer = new byte[airCopyResponseSize];
-            byte[] buffer = Enumerable.Repeat((byte)0, AirCopyResponseSize).ToArray();
-
-            int bytesRead = stream.Read(buffer, 0, AirCopyResponseSize);
-            if (bytesRead == 0) {
-                // if it's 0, then the connection closed unexpectedly?
-                // what's a good exception for this?
-                throw new Exception("Socket closed?");
-            }
-            return (buffer, bytesRead);
-        }
-
-        private static (byte[] buffer, int bytesRead) ReadFromStream(NetworkStream stream) {
-            int tagLength = SEND_PREVIEW_DATA.Length + 1;
-            var buffer = new byte[30270 + tagLength];
-            var bytesRead = 0;
-
-            return (buffer, bytesRead);
-        }
-
-
-        public static byte[] ReceiveAll(this Socket socket) {
-            var buffer = new List<byte>();
-            while (socket.Available > 0) {
-                var currByte = new Byte[1];
-                var byteCounter = socket.Receive(currByte, currByte.Length, SocketFlags.None);
-                if (byteCounter.Equals(1)) {
-                    buffer.Add(currByte[0]);
-                }
-            }
-            return buffer.ToArray();
-        }
-
-
-
-        // borrowed from https://www.csharp-examples.net/socket-send-receive
-        private static void Receive(Socket socket, byte[] buffer, int offset, int size, int timeout) {
-            int startTickCount = Environment.TickCount;
-            int received = 0;  // how many bytes is already received
-            do {
-                if (Environment.TickCount > startTickCount + timeout)
-                    throw new Exception("Timeout.");
-                try {
-                    received += socket.Receive(buffer, offset + received, size - received, SocketFlags.None);
-                }
-                catch (SocketException ex) {
-                    if (ex.SocketErrorCode == SocketError.WouldBlock ||
-                        ex.SocketErrorCode == SocketError.IOPending ||
-                        ex.SocketErrorCode == SocketError.NoBufferSpaceAvailable) {
-                        // socket buffer is probably empty, wait and try again
-                        Thread.Sleep(30);
-                    }
-                    else
-                        throw ex;  // any serious error occurr
-                }
-            } while (received < size);
-        }
-
-        private static void TestingSocketStuff() {
-            byte[] ByteBuffer = System.Text.Encoding.ASCII.GetBytes("hi there");
-        }
-
     }
 }
